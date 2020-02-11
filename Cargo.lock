@@ -316,6 +316,7 @@ checksum = "cd179ae861f0c2e53da70d892f5f3029f9594be0c41dc5269cd371691b1dc2f9"
 [[package]]
 name = "hyper"
 version = "0.13.2"
+source = "git+https://github.com/LucioFranco/hyper?branch=http2#40696403e3be3199912f0da4a6fa62bebd35c913"
 dependencies = [
  "bytes",
  "futures-channel",

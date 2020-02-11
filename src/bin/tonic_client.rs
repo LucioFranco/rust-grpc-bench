@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = GreeterClient::new(add_origin);
     let mut futs = vec![];
-    for _ in 0..1 {
+    for _ in 0..100 {
         futs.push(spawn(work_loop(client.clone(), state.clone())));
     }
 
