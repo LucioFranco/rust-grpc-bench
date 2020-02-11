@@ -23,7 +23,9 @@ struct State {
     request_time: AtomicUsize,
 }
 
-async fn do_work(mut client: GreeterClient<tonic::transport::Channel>, state: Arc<State>) {
+type Client = GreeterClient<AddOrigin<hyper::client::conn::Http2SendRequest<tonic::body::BoxBody>>>;
+
+async fn do_work(mut client: Client, state: Arc<State>) {
     let start = Instant::now();
     state.in_flight.fetch_add(1, Ordering::SeqCst);
 
@@ -52,7 +54,7 @@ async fn do_work(mut client: GreeterClient<tonic::transport::Channel>, state: Ar
     state.in_flight.fetch_sub(1, Ordering::SeqCst);
 }
 
-async fn work_loop(client: GreeterClient<tonic::transport::Channel>, state: Arc<State>) {
+async fn work_loop(client: Client, state: Arc<State>) {
     loop {
         do_work(client.clone(), state.clone()).await;
     }
@@ -124,13 +126,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_loop(log_state).await;
     });
 
-    let client = GreeterClient::connect("http://[::1]:50051").await?;
+    let settings = hyper::client::conn::Builder::new().http2_only(true).clone();
+    let connector = hyper::client::connect::HttpConnector::new();
+    let mut connector = hyper::client::service::Connect::new(connector, settings);
+    use tower::Service;
+    let uri = "http://[::1]:50051".parse::<http::Uri>().unwrap();
+    let conn = connector.call(uri.clone()).await.unwrap();
+
+    let add_origin = AddOrigin::new(conn.into_http2(), uri);
+
+    let client = GreeterClient::new(add_origin);
     let mut futs = vec![];
-    for _ in 0..100 {
+    for _ in 0..1 {
         futs.push(spawn(work_loop(client.clone(), state.clone())));
     }
 
     try_join_all(futs).await?;
 
     Ok(())
+}
+
+use http::{Request, Uri};
+use std::task::{Context, Poll};
+use tower::Service;
+
+#[derive(Clone, Debug)]
+pub(crate) struct AddOrigin<T> {
+    inner: T,
+    origin: Uri,
+}
+
+impl<T> AddOrigin<T> {
+    pub(crate) fn new(inner: T, origin: Uri) -> Self {
+        Self { inner, origin }
+    }
+}
+
+impl<T, ReqBody> Service<Request<ReqBody>> for AddOrigin<T>
+where
+    T: Service<Request<ReqBody>>,
+{
+    type Response = T::Response;
+    type Error = T::Error;
+    type Future = T::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        // Split the request into the head and the body.
+        let (mut head, body) = req.into_parts();
+
+        // Split the request URI into parts.
+        let mut uri: http::uri::Parts = head.uri.into();
+        let set_uri = self.origin.clone().into_parts();
+
+        // Update the URI parts, setting hte scheme and authority
+        uri.scheme = Some(set_uri.scheme.expect("expected scheme").clone());
+        uri.authority = Some(set_uri.authority.expect("expected authority").clone());
+
+        // Update the the request URI
+        head.uri = http::Uri::from_parts(uri).expect("valid uri");
+
+        let request = Request::from_parts(head, body);
+
+        self.inner.call(request)
+    }
 }
